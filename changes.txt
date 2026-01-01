@@ -1,0 +1,34 @@
+Changes on 2025-12-30:
+
+=== 早期修改 ===
+- Updated frontend/views/VideoCenter.tsx to use addCameraViaRTSP instead of createVideo, requiring stream URL for validation and mapping rtsp_url payload; adjusted IP label to optional.
+- Added this log file to document modifications.
+
+=== 20:30 - 发现并诊断问题 ===
+- 发现错误: 404 Client Error for url: http://127.0.0.1:8001/api/relays
+- 分析原因: node-media-server v4.2.2 不支持 /api/relays 动态API（该API仅存在于v2.x）
+- 创建文档: NMS_配置说明.md 记录问题和临时解决方案
+
+=== 20:45 - 降级方案实施 ===
+- 降级 media_server/package.json: node-media-server从^4.2.2降级到2.6.0
+- 简化 media_server/app.js: 移除trans配置段以避免v2.x的已知bug
+- 恢复 backend/app/services/video_service.py: 恢复自动化API调用代码（使用edge参数）
+
+=== 21:00 - API格式调试 ===
+- 创建测试脚本: media_server/test_api.js 用于测试不同的API payload格式
+- 发现v2.6.0版本运行但有uncaughtException错误
+- 通过测试脚本发现正确的API参数格式
+
+=== 21:08 - 最终修复 ===
+- 修复 backend/app/services/video_service.py:
+  * 将API参数从"edge"改为"url"（关键修复）
+  * 移除"rtsp_transport"参数（v2.6不需要）
+  * 更新HLS地址格式: /live/{stream_name}/index.m3u8
+  * 增强错误日志记录
+- 测试成功: 前端可以自动化添加摄像头，无需手动配置
+
+=== 最终状态 ===
+- ✅ node-media-server: 2.6.0（稳定版本）
+- ✅ 动态API: /api/relay/pull 使用url参数
+- ✅ 完全自动化: 前端添加→NMS API→数据库保存
+- ✅ 无需手动编辑app.js或重启服务
