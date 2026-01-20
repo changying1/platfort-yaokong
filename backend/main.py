@@ -1,4 +1,5 @@
 import os
+import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -13,6 +14,19 @@ from app.controllers import (
     dashboard_controller,
 )
 from app.utils.logger import get_logger
+
+# Enable verbose ONVIF/SOAP client logging for debugging PTZ stop issues
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s | %(name)s | %(levelname)s | %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logging.getLogger('zeep').setLevel(logging.DEBUG)
+logging.getLogger('zeep.transports').setLevel(logging.DEBUG)
+logging.getLogger('urllib3').setLevel(logging.DEBUG)
+# Optional: very verbose HTTP client logs; uncomment if needed
+# logging.getLogger('http.client').setLevel(logging.DEBUG)
+
 
 # Initialize Logger
 logger = get_logger("Main")

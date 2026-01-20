@@ -9,10 +9,27 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ src, onError }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const playerRef = useRef<any>(null);
   const retryCountRef = useRef(0);
+  const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'error'>('connecting');
 
-  const maxRetries = 5;
-  const retryDelay = 2000; // 2 seconds
+  const maxRetries = 10; // 增加到10次
+  const retryDelay = 1000; // 减少到1秒，让重试更频繁
+
+  const cleanupPlayer = () => {
+    if (retryTimeoutRef.current) {
+      clearTimeout(retryTimeoutRef.current);
+      retryTimeoutRef.current = null;
+    }
+    
+    if (playerRef.current) {
+      try {
+        playerRef.current.destroy();
+        playerRef.current = null;
+      } catch (e) {
+        console.warn('Error destroying player:', e);
+      }
+    }
+  };
 
   const initPlayer = () => {
     try {
@@ -44,6 +61,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ src, onError }) => {
       }
 
       if (flvjs.isSupported && flvjs.isSupported()) {
+        // 清理之前的播放器
         if (playerRef.current) {
           try {
             playerRef.current.destroy();
@@ -53,11 +71,13 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ src, onError }) => {
         }
 
         try {
+          console.log(`Initializing player (attempt ${retryCountRef.current + 1}/${maxRetries + 1})`);
+          
           playerRef.current = flvjs.createPlayer({
             type: 'flv',
             url: flvUrl,
             isLive: true,
-            hasAudio: false,  // G711U audio codec not supported by flv.js
+            hasAudio: false,
             hasVideo: true,
             deferredLoadThreshold: 0,
             bufferingDuration: 0.5,
@@ -70,45 +90,68 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ src, onError }) => {
             playerRef.current.attachMediaElement(videoRef.current);
             playerRef.current.load();
             
-            // Add event listeners
+            // 错误处理
             playerRef.current.on('error', (type: string, detail: any, msg: string) => {
-              console.error('FLV player error:', type, detail, msg);
-              setConnectionStatus('error');
+              console.error('FLV player error:', { type, detail, msg });
               
-              // Retry on errors
+              // NETWORK_ERROR 和 MEDIA_ERROR 都需要重试
               if (retryCountRef.current < maxRetries) {
-                console.log(`Retrying stream... (attempt ${retryCountRef.current + 1}/${maxRetries})`);
+                console.log(`Stream not ready, retrying... (${retryCountRef.current + 1}/${maxRetries})`);
+                setConnectionStatus('connecting');
                 retryCountRef.current++;
-                setTimeout(() => {
+                
+                // 清理当前播放器
+                cleanupPlayer();
+                
+                // 延迟重试
+                retryTimeoutRef.current = setTimeout(() => {
                   initPlayer();
                 }, retryDelay);
               } else {
-                const errorMsg = `Failed to load stream after ${maxRetries} retries. Stream may not be available yet.`;
+                const errorMsg = `无法连接到视频流（已重试 ${maxRetries} 次）。请检查摄像头是否在线或稍后重试。`;
                 console.error(errorMsg);
+                setConnectionStatus('error');
                 onError?.(errorMsg);
               }
             });
 
+            // 成功连接
             playerRef.current.on('statistics_info', (stats: any) => {
-              setConnectionStatus('connected');
-              retryCountRef.current = 0; // Reset retry count on successful connection
-              console.log('Stream stats:', stats);
+              if (connectionStatus !== 'connected') {
+                console.log('✅ Stream connected successfully');
+                setConnectionStatus('connected');
+                retryCountRef.current = 0; // 重置重试计数
+              }
             });
 
+            // 监听播放事件
+            if (videoRef.current) {
+              videoRef.current.onplaying = () => {
+                console.log('Video is playing');
+                setConnectionStatus('connected');
+                retryCountRef.current = 0;
+              };
+            }
+
+            // 开始播放
             playerRef.current.play().catch((e: any) => {
               console.warn('Auto-play failed:', e);
+              // 自动播放失败不算错误，浏览器策略导致的
             });
           }
         } catch (e) {
           console.error('Failed to create FLV player:', e);
-          setConnectionStatus('error');
+          
           if (retryCountRef.current < maxRetries) {
+            setConnectionStatus('connecting');
             retryCountRef.current++;
-            setTimeout(() => {
+            
+            retryTimeoutRef.current = setTimeout(() => {
               initPlayer();
             }, retryDelay);
           } else {
-            onError?.(`Failed to create player: ${e}`);
+            setConnectionStatus('error');
+            onError?.(`无法创建播放器: ${e}`);
           }
         }
       } else {
@@ -129,18 +172,14 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ src, onError }) => {
   useEffect(() => {
     if (!src) return;
     
-    retryCountRef.current = 0; // Reset retry count when src changes
+    console.log('Video source changed:', src);
+    retryCountRef.current = 0; // 重置重试计数
+    setConnectionStatus('connecting');
     initPlayer();
 
     return () => {
-      if (playerRef.current) {
-        try {
-          playerRef.current.destroy();
-          playerRef.current = null;
-        } catch (e) {
-          console.warn('Error cleaning up player:', e);
-        }
-      }
+      console.log('Cleaning up video player');
+      cleanupPlayer();
     };
   }, [src]);
 
@@ -151,21 +190,45 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ src, onError }) => {
         className="w-full h-full object-contain"
         controls
         autoPlay
+        muted // 添加 muted 避免浏览器自动播放策略限制
       />
       
-      {/* Connection status indicator */}
+      {/* 连接状态指示器 */}
       <div className="absolute top-2 right-2 flex items-center gap-2 bg-black/60 px-3 py-1 rounded text-xs">
         <div className={`w-2 h-2 rounded-full ${
-          connectionStatus === 'connected' ? 'bg-green-500' :
-          connectionStatus === 'connecting' ? 'bg-yellow-500' :
+          connectionStatus === 'connected' ? 'bg-green-500 animate-pulse' :
+          connectionStatus === 'connecting' ? 'bg-yellow-500 animate-pulse' :
           'bg-red-500'
         }`} />
         <span className="text-white">
-          {connectionStatus === 'connected' ? 'Live' :
-           connectionStatus === 'connecting' ? 'Connecting...' :
-           'Error'}
+          {connectionStatus === 'connected' ? '直播中' :
+           connectionStatus === 'connecting' ? `连接中${retryCountRef.current > 0 ? ` (${retryCountRef.current}/${maxRetries})` : '...'}` :
+           '连接失败'}
         </span>
       </div>
+      
+      {/* 错误提示 */}
+      {connectionStatus === 'error' && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/80">
+          <div className="text-center text-white p-6">
+            <div className="text-4xl mb-4">⚠️</div>
+            <div className="text-lg font-semibold mb-2">视频流连接失败</div>
+            <div className="text-sm text-gray-300 mb-4">
+              请检查摄像头是否在线，或稍后重试
+            </div>
+            <button
+              onClick={() => {
+                retryCountRef.current = 0;
+                setConnectionStatus('connecting');
+                initPlayer();
+              }}
+              className="px-4 py-2 bg-blue-500 hover:bg-blue-600 rounded text-white"
+            >
+              重新连接
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
