@@ -42,3 +42,10 @@ Thumbs.db
 *.njsproj
 *.sln
 *.sw?
+
+media_server/media/
+
+ffmpeg-8.0.1-essentials_build/*
+!ffmpeg-8.0.1-essentials_build/bin/
+ffmpeg-8.0.1-essentials_build/bin/*
+!ffmpeg-8.0.1-essentials_build/bin/ffmpeg.exe

@@ -10,6 +10,7 @@ import os
 import glob
 import time
 import subprocess
+import signal
 from datetime import datetime, timedelta, timezone
 import logging
 import sys
@@ -44,8 +45,11 @@ NMS_USER = "admin"
 NMS_PASS = "123456" 
 NMS_MEDIA_ROOT = os.path.abspath(os.getenv("NMS_MEDIA_ROOT", r"C:\media"))
 
-# --- 全局连接缓存 ---
+# --- 全局缓存 ---
 ONVIF_CLIENT_CACHE = {}
+
+# [新增] 全局字典：用于存储正在运行的 FFmpeg 进程 {stream_name: process_object}
+FFMPEG_PROCESSES = {}
 
 class VideoService:
     # -------------------------------------------------------------------------
@@ -101,22 +105,16 @@ class VideoService:
     # 辅助: 生成 WS-Security Header (模拟 ODM 认证)
     # -------------------------------------------------------------------------
     def _generate_wsse_header(self, username, password):
-        # 1. 生成 Nonce (随机数)
         nonce_raw = os.urandom(16)
         nonce_b64 = base64.b64encode(nonce_raw).decode('utf-8')
-        
-        # 2. 生成 Created (时间戳)
         created = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.000Z')
         
-        # 3. 生成 PasswordDigest
-        # Digest = Base64( SHA1( RawNonce + Created + Password ) )
         sha1 = hashlib.sha1()
         sha1.update(nonce_raw)
         sha1.update(created.encode('utf-8'))
         sha1.update(password.encode('utf-8'))
         digest = base64.b64encode(sha1.digest()).decode('utf-8')
         
-        # 4. 拼接 Header XML
         return f"""<s:Header>
     <Security s:mustUnderstand="1" xmlns="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">
         <UsernameToken>
@@ -132,10 +130,6 @@ class VideoService:
     # 核心 2: 原始 SOAP 停止 (ODMFix)
     # -------------------------------------------------------------------------
     def _send_raw_soap_stop(self, camera, ptz_service, profile_token, username, password):
-        """
-        全手动构造带 Auth 的 SOAP 包，直接通过 HTTP 发送。
-        """
-        # 1. 获取 PTZ URL
         ptz_url = None
         if hasattr(ptz_service, 'binding') and hasattr(ptz_service.binding, 'options'):
             ptz_url = ptz_service.binding.options.get('address')
@@ -146,14 +140,22 @@ class VideoService:
             logger.error("No PTZ URL found")
             return False
 
-        # 2. 生成验证头
         security_header = self._generate_wsse_header(username, password)
 
-        # 3. 准备爆破载荷 (Payloads)
-        # ODM 默认通常是全 true/false (小写)
-        # 海康有时需要整数 1/0
         payloads = [
-            # 方案 A: 全布尔值 (ODM Standard)
+            # 方案 0: Wireshark 抓包复刻
+            f"""<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope">
+  {security_header}
+  <s:Body xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+    <Stop xmlns="http://www.onvif.org/ver20/ptz/wsdl">
+      <ProfileToken>{profile_token}</ProfileToken>
+      <PanTilt>true</PanTilt>
+      <Zoom>false</Zoom>
+    </Stop>
+  </s:Body>
+</s:Envelope>""",
+            # 方案 A: 备用
             f"""<?xml version="1.0" encoding="UTF-8"?>
 <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl">
   {security_header}
@@ -165,8 +167,7 @@ class VideoService:
     </tptz:Stop>
   </s:Body>
 </s:Envelope>""",
-
-            # 方案 B: 整数模式 (Hikvision Compatible)
+            # 方案 B: 备用
             f"""<?xml version="1.0" encoding="UTF-8"?>
 <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl">
   {security_header}
@@ -177,18 +178,6 @@ class VideoService:
       <tptz:Zoom>1</tptz:Zoom>
     </tptz:Stop>
   </s:Body>
-</s:Envelope>""",
-            
-            # 方案 C: 仅 PanTilt 整数
-            f"""<?xml version="1.0" encoding="UTF-8"?>
-<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl">
-  {security_header}
-  <s:Body>
-    <tptz:Stop>
-      <tptz:ProfileToken>{profile_token}</tptz:ProfileToken>
-      <tptz:PanTilt>1</tptz:PanTilt>
-    </tptz:Stop>
-  </s:Body>
 </s:Envelope>"""
         ]
 
@@ -196,20 +185,16 @@ class VideoService:
             'Content-Type': 'application/soap+xml; charset=utf-8; action="http://www.onvif.org/ver20/ptz/wsdl/Stop"'
         }
 
-        # 4. 循环尝试
         for i, payload in enumerate(payloads):
             try:
-                # 使用 requests 直接发送，不依赖 suds/zeep
                 response = requests.post(ptz_url, data=payload, headers=headers, timeout=2)
-                
-                if response.status_code == 200:
-                    logger.info(f"Raw SOAP Variant {i+1} SUCCESS")
+                if 200 <= response.status_code < 300:
+                    logger.info(f"Raw SOAP Variant {i} (Capture Match) SUCCESS")
                     return True
                 else:
-                    logger.warning(f"Raw SOAP Variant {i+1} Failed: {response.status_code}")
+                    logger.warning(f"Raw SOAP Variant {i} Failed: {response.status_code}")
             except Exception as e:
-                logger.error(f"Raw SOAP Variant {i+1} Error: {e}")
-        
+                logger.error(f"Raw SOAP Variant {i} Error: {e}")
         return False
 
     def ptz_stop_move(self, db: Session, video_id: int):
@@ -222,12 +207,10 @@ class VideoService:
             
             logger.info(f"STOPPING {db_video.name} using ODM Raw Mode...")
 
-            # --- 方案: Raw SOAP (ODM 模拟) ---
-            # 传递用户名密码以生成 WSSE 头
             if self._send_raw_soap_stop(camera, ptz, token, db_video.username, db_video.password):
                 return {"status": "success", "message": "Stopped (ODM Mode)"}
             
-            # --- 兜底: 零速度 ---
+            # 兜底
             try:
                 space_uri = "http://www.onvif.org/ver10/tptz/PanTiltSpaces/VelocityGenericSpace"
                 stop_req = {
@@ -249,9 +232,6 @@ class VideoService:
             logger.error(f"Stop Fatal Error: {e}")
             raise ValueError(f"停止失败: {e}")
 
-    # -------------------------------------------------------------------------
-    # 开始控制
-    # -------------------------------------------------------------------------
     def ptz_start_move(self, db: Session, video_id: int, direction: str, speed: float = 0.5):
         db_video = db.query(VideoDevice).filter(VideoDevice.id == video_id).first()
         if not db_video: raise ValueError("Device not found")
@@ -263,7 +243,6 @@ class VideoService:
             pan = speed if direction == 'right' else (-speed if direction == 'left' else 0.0)
             tilt = speed if direction == 'up' else (-speed if direction == 'down' else 0.0)
 
-            # 严禁 Zoom, 使用 5秒超时
             request = {
                 'ProfileToken': token,
                 'Velocity': {'PanTilt': {'x': pan, 'y': tilt}},
@@ -275,7 +254,6 @@ class VideoService:
             if video_id in ONVIF_CLIENT_CACHE: del ONVIF_CLIENT_CACHE[video_id]
             raise ValueError(f"Start failed: {e}")
 
-    # --- 辅助方法 ---
     def _get_profile_token(self, media_service):
         profiles = media_service.GetProfiles()
         if not profiles: raise Exception("No profiles")
@@ -284,17 +262,31 @@ class VideoService:
     def _get_direction_name(self, direction: str) -> str:
         return {'up':'上','down':'下','left':'左','right':'右'}.get(direction, direction)
 
-    # --- 其他基础业务方法 ---
+    # -------------------------------------------------------------------------
+    # 核心业务: 添加/删除/更新
+    # -------------------------------------------------------------------------
     def add_camera_to_media_server(self, db: Session, camera_data: CameraCreateRequest):
         logger.info(f"Adding stream: {camera_data.name}")
         stream_name = camera_data.name.replace(" ", "_").replace("/", "_").lower()
-        nms_api_url = f"{NMS_HOST}/api/relay/pull"
-        payload = {"app": "live", "mode": "static", "url": camera_data.rtsp_url, "name": stream_name}
-        try:
-            requests.post(nms_api_url, json=payload, auth=(NMS_USER, NMS_PASS), timeout=5)
-        except Exception: pass
+        
+        # [修改] 1. 启动推流并存入全局字典
+        self.start_ffmpeg_stream(camera_data.rtsp_url, stream_name)
+
+        # 2. 构造播放地址
         flv_url = f"{NMS_HOST}/live/{stream_name}.flv"
-        new_video = VideoDevice(name=camera_data.name, ip_address=camera_data.ip_address, port=camera_data.port, username=camera_data.username, password=camera_data.password, stream_url=flv_url, latitude=camera_data.latitude, longitude=camera_data.longitude, status="online", remark=camera_data.remark)
+        
+        new_video = VideoDevice(
+            name=camera_data.name, 
+            ip_address=camera_data.ip_address, 
+            port=camera_data.port, 
+            username=camera_data.username, 
+            password=camera_data.password, 
+            stream_url=flv_url, 
+            latitude=camera_data.latitude, 
+            longitude=camera_data.longitude, 
+            status="online", 
+            remark=camera_data.remark
+        )
         db.add(new_video)
         db.commit()
         db.refresh(new_video)
@@ -323,6 +315,10 @@ class VideoService:
     def delete_video(self, db: Session, video_id: int):
         db_video = db.query(VideoDevice).filter(VideoDevice.id == video_id).first()
         if db_video:
+            # [新增] 删除视频时，先停止对应的推流进程
+            stream_name = db_video.name.replace(" ", "_").replace("/", "_").lower()
+            self.stop_ffmpeg_stream(stream_name)
+            
             db.delete(db_video)
             db.commit()
             if video_id in ONVIF_CLIENT_CACHE: del ONVIF_CLIENT_CACHE[video_id]
@@ -341,3 +337,83 @@ class VideoService:
             return {"status": "success"}
         except Exception as e:
             raise ValueError(f"Move error: {e}")
+
+    # -------------------------------------------------------------------------
+    # [新功能] V4 极速推流 + 进程管理
+    # -------------------------------------------------------------------------
+    def start_ffmpeg_stream(self, rtsp_url: str, stream_name: str):
+        """
+        启动 FFmpeg 推流 (隐藏窗口 + 全局管理)
+        """
+        # 如果已经存在同名推流，先停止旧的
+        self.stop_ffmpeg_stream(stream_name)
+
+        ffmpeg_path = r"C:\Users\DELL\Desktop\platform-shipin-yaokong\platfort-yaokong\ffmpeg-8.0.1-essentials_build\bin\ffmpeg.exe" 
+        rtmp_url = f"rtmp://127.0.0.1:19350/live/{stream_name}"
+        
+        # V4 完美配置
+        command = [
+            ffmpeg_path, "-y",
+            "-f", "rtsp", "-rtsp_transport", "tcp",
+            "-user_agent", "LIVE555 Streaming Media v2013.02.11",
+            "-fflags", "nobuffer", "-flags", "low_delay",
+            "-strict", "experimental",
+            "-analyzeduration", "100000", "-probesize", "100000",
+            "-i", rtsp_url,
+            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+            "-b:v", "4000k", "-maxrate", "6000k", "-bufsize", "1000k",
+            "-pix_fmt", "yuv420p", "-g", "15",
+            "-c:a", "aac", "-b:a", "64k", "-ar", "16000",
+            "-flvflags", "no_duration_filesize",
+            "-f", "flv", rtmp_url
+        ]
+
+        logger.info(f"Starting FFmpeg Stream for {stream_name}...")
+        
+        try:
+            # [修改关键点] 隐藏 CMD 窗口
+            startupinfo = None
+            creationflags = 0
+            
+            if os.name == 'nt':
+                # Windows 下使用 CREATE_NO_WINDOW (0x08000000) 彻底隐藏
+                creationflags = 0x08000000 
+            
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.DEVNULL, 
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags
+            )
+            
+            # [新增] 存入全局字典
+            FFMPEG_PROCESSES[stream_name] = process
+            logger.info(f"Stream {stream_name} started (PID: {process.pid})")
+            
+            return process
+        except Exception as e:
+            logger.error(f"FFmpeg start failed: {e}")
+            return None
+
+    def stop_ffmpeg_stream(self, stream_name: str):
+        """
+        [新增] 停止并清理 FFmpeg 进程
+        """
+        global FFMPEG_PROCESSES
+        process = FFMPEG_PROCESSES.get(stream_name)
+        
+        if process:
+            try:
+                logger.info(f"Stopping FFmpeg for {stream_name} (PID: {process.pid})...")
+                process.terminate() # 尝试温和关闭
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()  # 强制关闭
+                logger.info(f"Stream {stream_name} stopped.")
+            except Exception as e:
+                logger.error(f"Error stopping stream {stream_name}: {e}")
+            finally:
+                # 无论如何从字典中移除
+                if stream_name in FFMPEG_PROCESSES:
+                    del FFMPEG_PROCESSES[stream_name]
