@@ -43,6 +43,7 @@ app.mount("/static", StaticFiles(directory=static_dir), name="static")
 app.add_middleware(
     CORSMiddleware,
     # allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],  # 你的前端地址
+    allow_origins=["*"],  # 允许所有来源，开发时使用
     allow_origin_regex='.*',  # Allow all origins for development
     allow_credentials=True,
     allow_methods=["*"],  # 允许 GET/POST/PUT/DELETE/OPTIONS 等

@@ -16,8 +16,12 @@ import {
   Loader,
   Settings,
   Edit2,
+  // --- ✅ 新增图标（已合并，无重复）---
+  Shield,
+  ShieldAlert,
+  ShieldCheck,
 } from "lucide-react";
-// 假设 types 定义在 api/videoApi 中，需确保与后端 schema 一致
+
 import VideoPlayer from "../src/components/VideoPlayer";
 import PTZControlPanel from "../src/components/PTZControlPanel";
 import {
@@ -30,35 +34,39 @@ import {
   Video,
   VideoCreate,
   VideoUpdate,
+  // --- ✅ 新增 API（已合并，无重复）---
+  startAIMonitoring,
+  stopAIMonitoring,
 } from "../src/api/videoApi";
 
 export default function VideoCenter() {
   // --- 状态管理 ---
+  const [algoType, setAlgoType] = useState("helmet");
   const [devices, setDevices] = useState<Video[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [maximizedVideo, setMaximizedVideo] = useState<Video | null>(null);
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
+  
+  // --- ✅ 新增 AI 监控状态 ---
+  const [isAIEnabled, setIsAIEnabled] = useState(false);
+  const [aiLoading, setAiLoading] = useState(false);
+
+  // --- 分页与网格状态 ---
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(9);
   const [gridInputValue, setGridInputValue] = useState("9");
-  const [previewStreams, setPreviewStreams] = useState<Record<number, string>>(
-    {}
-  );
-  const [previewLoading, setPreviewLoading] = useState<Record<number, boolean>>(
-    {}
-  );
-  const [previewErrors, setPreviewErrors] = useState<Record<number, string>>(
-    {}
-  );
+  const [previewStreams, setPreviewStreams] = useState<Record<number, string>>({});
+  const [previewLoading, setPreviewLoading] = useState<Record<number, boolean>>({});
+  const [previewErrors, setPreviewErrors] = useState<Record<number, string>>({});
 
+  // --- 弹窗与表单状态 ---
   const [showAddModal, setShowAddModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [selectedDevice, setSelectedDevice] = useState<Video | null>(null);
   const [editingDevice, setEditingDevice] = useState<Video | null>(null);
 
-  // 表单状态更新：补全后端 VideoCreate schema 中的所有字段
   const [newDeviceForm, setNewDeviceForm] = useState<VideoCreate>({
     name: "",
     ip_address: "",
@@ -80,6 +88,36 @@ export default function VideoCenter() {
     status: "offline",
     remark: "",
   });
+
+  // --- ✅ 新增：切换摄像头时重置 AI 状态 ---
+  useEffect(() => {
+    setIsAIEnabled(false);
+  }, [maximizedVideo]);
+
+  // --- ✅ 新增：AI 开关处理函数 ---
+  const handleToggleAI = async () => {
+    if (!maximizedVideo) return;
+    setAiLoading(true);
+    try {
+      if (isAIEnabled) {
+        await stopAIMonitoring(String(maximizedVideo.id));
+        setIsAIEnabled(false);
+      } else {
+        // 👇 将选中的 algoType 传给 API
+        await startAIMonitoring(
+             String(maximizedVideo.id), 
+             maximizedVideo.stream_url || maximizedVideo.rtsp_url || "", 
+             algoType 
+        );
+        setIsAIEnabled(true);
+      }
+    } catch (error) {
+      console.error("AI 切换失败:", error);
+      alert("AI 服务连接失败");
+    } finally {
+      setAiLoading(false);
+    }
+  };
 
   // --- 初始化加载 ---
   useEffect(() => {
@@ -180,7 +218,6 @@ export default function VideoCenter() {
   };
 
   const handleAddDevice = async () => {
-    // 必填校验：名称 + RTSP 流地址
     if (!newDeviceForm.name || !newDeviceForm.stream_url) {
       alert("请填写必填字段：设备名称和流地址");
       return;
@@ -200,7 +237,6 @@ export default function VideoCenter() {
       const newDevice = await addCameraViaRTSP(payload);
       setDevices([newDevice, ...devices]);
       setShowAddModal(false);
-      // 重置表单
       setNewDeviceForm({
         name: "",
         ip_address: "",
@@ -213,14 +249,8 @@ export default function VideoCenter() {
       });
     } catch (err: any) {
       console.error("添加失败详情:", err);
-      if (err.message && err.message.includes("Unexpected token")) {
-        alert(
-          "添加失败: 接口返回格式错误(可能是 HTML)。请检查浏览器控制台 Network 面板的响应内容，确认后端服务正常且路径正确。"
-        );
-      } else {
-        const errorMsg = err.message || JSON.stringify(err);
-        alert(`添加失败: ${errorMsg}`);
-      }
+      const errorMsg = err.message || JSON.stringify(err);
+      alert(`添加失败: ${errorMsg}`);
     }
   };
 
@@ -271,7 +301,6 @@ export default function VideoCenter() {
     }
   };
 
-  // 计算动态列数
   const cols = Math.ceil(Math.sqrt(itemsPerPage));
 
   if (loading)
@@ -408,7 +437,6 @@ export default function VideoCenter() {
                         )}
                       </div>
                     </div>
-
                     {/* 状态指示器 */}
                     <div className="absolute top-2 left-2 flex items-center gap-2 z-10">
                       <span
@@ -422,7 +450,6 @@ export default function VideoCenter() {
                         {device.name}
                       </span>
                     </div>
-
                     {/* 悬浮操作栏 */}
                     <div className="absolute bottom-2 right-2 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity z-10">
                       <button
@@ -443,8 +470,7 @@ export default function VideoCenter() {
             );
           })}
         </div>
-
-        {/* 分页与布局控制 */}
+        {/* 分页控制 */}
         <div className="h-12 bg-white border border-gray-200 rounded-lg flex items-center justify-between px-4 shadow-sm">
           <div className="text-xs text-gray-600">
             共 {filteredDevices.length} 个设备
@@ -484,7 +510,7 @@ export default function VideoCenter() {
         </div>
       </div>
 
-      {/* 添加设备弹窗 - 已更新以匹配后端 schema */}
+      {/* 添加设备弹窗 */}
       {showAddModal && (
         <div className="fixed inset-0 z-[100] bg-black/40 flex items-center justify-center p-4 backdrop-blur-sm">
           <div className="bg-white border border-gray-200 rounded-lg w-[500px] p-6 shadow-2xl">
@@ -499,9 +525,8 @@ export default function VideoCenter() {
                 <X size={20} />
               </button>
             </div>
-
+            {/* 表单内容 */}
             <div className="grid grid-cols-2 gap-4">
-              {/* 基础信息 */}
               <div className="col-span-2">
                 <label className="text-xs font-semibold text-gray-700 block mb-1">
                   设备名称 <span className="text-red-500">*</span>
@@ -515,78 +540,52 @@ export default function VideoCenter() {
                   placeholder="例如：北门入口摄像头"
                 />
               </div>
-
-              {/* 网络信息 */}
               <div>
-                <label className="text-xs font-semibold text-gray-700 block mb-1">
-                  IP 地址（可选）
-                </label>
+                <label className="text-xs font-semibold text-gray-700 block mb-1">IP 地址</label>
                 <input
                   className="w-full bg-gray-50 border border-gray-300 rounded p-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-100 outline-none text-gray-900"
                   value={newDeviceForm.ip_address}
                   onChange={(e) =>
-                    setNewDeviceForm({
-                      ...newDeviceForm,
-                      ip_address: e.target.value,
-                    })
+                    setNewDeviceForm({ ...newDeviceForm, ip_address: e.target.value })
                   }
                   placeholder="192.168.1.100"
                 />
               </div>
               <div>
-                <label className="text-xs font-semibold text-gray-700 block mb-1">
-                  端口
-                </label>
+                <label className="text-xs font-semibold text-gray-700 block mb-1">端口</label>
                 <input
                   type="number"
                   className="w-full bg-gray-50 border border-gray-300 rounded p-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-100 outline-none text-gray-900"
                   value={newDeviceForm.port}
                   onChange={(e) =>
-                    setNewDeviceForm({
-                      ...newDeviceForm,
-                      port: parseInt(e.target.value) || 80,
-                    })
+                    setNewDeviceForm({ ...newDeviceForm, port: parseInt(e.target.value) || 80 })
                   }
                   placeholder="80"
                 />
               </div>
-
-              {/* 认证信息 */}
               <div>
-                <label className="text-xs font-semibold text-gray-700 block mb-1">
-                  用户名
-                </label>
+                <label className="text-xs font-semibold text-gray-700 block mb-1">用户名</label>
                 <input
                   className="w-full bg-gray-50 border border-gray-300 rounded p-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-100 outline-none text-gray-900"
                   value={newDeviceForm.username || ""}
                   onChange={(e) =>
-                    setNewDeviceForm({
-                      ...newDeviceForm,
-                      username: e.target.value,
-                    })
+                    setNewDeviceForm({ ...newDeviceForm, username: e.target.value })
                   }
                   placeholder="请输入登录账号"
                 />
               </div>
               <div>
-                <label className="text-xs font-semibold text-gray-700 block mb-1">
-                  密码
-                </label>
+                <label className="text-xs font-semibold text-gray-700 block mb-1">密码</label>
                 <input
                   type="password"
                   className="w-full bg-gray-50 border border-gray-300 rounded p-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-100 outline-none text-gray-900"
                   value={newDeviceForm.password || ""}
                   onChange={(e) =>
-                    setNewDeviceForm({
-                      ...newDeviceForm,
-                      password: e.target.value,
-                    })
+                    setNewDeviceForm({ ...newDeviceForm, password: e.target.value })
                   }
                   placeholder="******"
                 />
               </div>
-
-              {/* 流地址 & 备注 */}
               <div className="col-span-2">
                 <label className="text-xs font-semibold text-gray-700 block mb-1">
                   流地址（RTSP/HLS）
@@ -595,36 +594,23 @@ export default function VideoCenter() {
                   className="w-full bg-gray-50 border border-gray-300 rounded p-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-100 outline-none text-gray-900"
                   value={newDeviceForm.stream_url || ""}
                   onChange={(e) =>
-                    setNewDeviceForm({
-                      ...newDeviceForm,
-                      stream_url: e.target.value,
-                    })
+                    setNewDeviceForm({ ...newDeviceForm, stream_url: e.target.value })
                   }
                   placeholder="示例：rtsp://账号:密码@192.168.1.100:554/..."
                 />
-                <p className="text-[10px] text-gray-500 mt-1">
-                  留空则系统可能尝试根据 IP 和账号自动生成
-                </p>
               </div>
-
               <div className="col-span-2">
-                <label className="text-xs font-semibold text-gray-700 block mb-1">
-                  备注
-                </label>
+                <label className="text-xs font-semibold text-gray-700 block mb-1">备注</label>
                 <input
                   className="w-full bg-gray-50 border border-gray-300 rounded p-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-100 outline-none text-gray-900"
                   value={newDeviceForm.remark || ""}
                   onChange={(e) =>
-                    setNewDeviceForm({
-                      ...newDeviceForm,
-                      remark: e.target.value,
-                    })
+                    setNewDeviceForm({ ...newDeviceForm, remark: e.target.value })
                   }
                   placeholder="位置描述或其他信息"
                 />
               </div>
             </div>
-
             <div className="flex gap-3 mt-8">
               <button
                 onClick={handleAddDevice}
@@ -658,9 +644,8 @@ export default function VideoCenter() {
                 <X size={20} />
               </button>
             </div>
-
+            {/* 表单内容 */}
             <div className="grid grid-cols-2 gap-4">
-              {/* 基础信息 */}
               <div className="col-span-2">
                 <label className="text-xs font-semibold text-gray-700 block mb-1">
                   设备名称 <span className="text-red-500">*</span>
@@ -669,86 +654,57 @@ export default function VideoCenter() {
                   className="w-full bg-gray-50 border border-gray-300 rounded p-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-100 outline-none text-gray-900"
                   value={editDeviceForm.name}
                   onChange={(e) =>
-                    setEditDeviceForm({
-                      ...editDeviceForm,
-                      name: e.target.value,
-                    })
+                    setEditDeviceForm({ ...editDeviceForm, name: e.target.value })
                   }
                   placeholder="例如：北门入口摄像头"
                 />
               </div>
-
-              {/* 网络信息 */}
               <div>
-                <label className="text-xs font-semibold text-gray-700 block mb-1">
-                  IP 地址
-                </label>
+                <label className="text-xs font-semibold text-gray-700 block mb-1">IP 地址</label>
                 <input
                   className="w-full bg-gray-50 border border-gray-300 rounded p-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-100 outline-none text-gray-900"
                   value={editDeviceForm.ip_address}
                   onChange={(e) =>
-                    setEditDeviceForm({
-                      ...editDeviceForm,
-                      ip_address: e.target.value,
-                    })
+                    setEditDeviceForm({ ...editDeviceForm, ip_address: e.target.value })
                   }
                   placeholder="192.168.1.100"
                 />
               </div>
               <div>
-                <label className="text-xs font-semibold text-gray-700 block mb-1">
-                  端口
-                </label>
+                <label className="text-xs font-semibold text-gray-700 block mb-1">端口</label>
                 <input
                   type="number"
                   className="w-full bg-gray-50 border border-gray-300 rounded p-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-100 outline-none text-gray-900"
                   value={editDeviceForm.port}
                   onChange={(e) =>
-                    setEditDeviceForm({
-                      ...editDeviceForm,
-                      port: parseInt(e.target.value) || 80,
-                    })
+                    setEditDeviceForm({ ...editDeviceForm, port: parseInt(e.target.value) || 80 })
                   }
                   placeholder="80"
                 />
               </div>
-
-              {/* 认证信息 */}
               <div>
-                <label className="text-xs font-semibold text-gray-700 block mb-1">
-                  用户名
-                </label>
+                <label className="text-xs font-semibold text-gray-700 block mb-1">用户名</label>
                 <input
                   className="w-full bg-gray-50 border border-gray-300 rounded p-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-100 outline-none text-gray-900"
                   value={editDeviceForm.username || ""}
                   onChange={(e) =>
-                    setEditDeviceForm({
-                      ...editDeviceForm,
-                      username: e.target.value,
-                    })
+                    setEditDeviceForm({ ...editDeviceForm, username: e.target.value })
                   }
                   placeholder="请输入登录账号"
                 />
               </div>
               <div>
-                <label className="text-xs font-semibold text-gray-700 block mb-1">
-                  密码
-                </label>
+                <label className="text-xs font-semibold text-gray-700 block mb-1">密码</label>
                 <input
                   type="password"
                   className="w-full bg-gray-50 border border-gray-300 rounded p-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-100 outline-none text-gray-900"
                   value={editDeviceForm.password || ""}
                   onChange={(e) =>
-                    setEditDeviceForm({
-                      ...editDeviceForm,
-                      password: e.target.value,
-                    })
+                    setEditDeviceForm({ ...editDeviceForm, password: e.target.value })
                   }
                   placeholder="******"
                 />
               </div>
-
-              {/* 流地址 & 备注 */}
               <div className="col-span-2">
                 <label className="text-xs font-semibold text-gray-700 block mb-1">
                   流地址（RTSP/HLS）
@@ -757,33 +713,23 @@ export default function VideoCenter() {
                   className="w-full bg-gray-50 border border-gray-300 rounded p-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-100 outline-none text-gray-900"
                   value={editDeviceForm.stream_url || ""}
                   onChange={(e) =>
-                    setEditDeviceForm({
-                      ...editDeviceForm,
-                      stream_url: e.target.value,
-                    })
+                    setEditDeviceForm({ ...editDeviceForm, stream_url: e.target.value })
                   }
                   placeholder="示例：rtsp://账号:密码@192.168.1.100:554/..."
                 />
               </div>
-
               <div className="col-span-2">
-                <label className="text-xs font-semibold text-gray-700 block mb-1">
-                  备注
-                </label>
+                <label className="text-xs font-semibold text-gray-700 block mb-1">备注</label>
                 <input
                   className="w-full bg-gray-50 border border-gray-300 rounded p-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-100 outline-none text-gray-900"
                   value={editDeviceForm.remark || ""}
                   onChange={(e) =>
-                    setEditDeviceForm({
-                      ...editDeviceForm,
-                      remark: e.target.value,
-                    })
+                    setEditDeviceForm({ ...editDeviceForm, remark: e.target.value })
                   }
                   placeholder="位置描述或其他信息"
                 />
               </div>
             </div>
-
             <div className="flex gap-3 mt-8">
               <button
                 onClick={handleUpdateDevice}
@@ -802,7 +748,7 @@ export default function VideoCenter() {
         </div>
       )}
 
-      {/* 播放弹窗 */}
+      {/* 播放弹窗 (包含 AI 侧边栏) */}
       {maximizedVideo && (
         <div className="fixed inset-0 z-[200] bg-white flex flex-col p-4 gap-4">
           {/* Header */}
@@ -824,7 +770,7 @@ export default function VideoCenter() {
             </button>
           </div>
 
-          {/* Main Content - Flex layout */}
+          {/* Main Content */}
           <div className="flex-1 flex gap-4 min-h-0">
             {/* Video Section */}
             <div className="flex-1 flex flex-col bg-gray-50 rounded-lg border border-gray-200 overflow-hidden">
@@ -849,18 +795,93 @@ export default function VideoCenter() {
               )}
             </div>
 
-            {/* PTZ Control Panel - Vertical sidebar */}
+            {/* Right Sidebar: AI Control + PTZ */}
             {streamUrl && (
-              <div className="w-80 bg-white rounded-lg border border-gray-200 overflow-y-auto shadow-lg">
-                <PTZControlPanel
-                  video={maximizedVideo}
-                  onSuccess={(msg) => {
-                    console.log(msg);
-                  }}
-                  onError={(err) => {
-                    console.error(err);
-                  }}
-                />
+              <div className="w-80 flex flex-col gap-3 h-full">
+                
+                {/* ✅ 新增：AI 安全监测卡片 */}
+                <div className="bg-white rounded-lg border border-gray-200 p-4 shadow-lg shrink-0">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                      <Shield size={18} className="text-blue-600" />
+                      AI 安全监测
+                    </h3>
+                    <span className={`text-xs px-2 py-0.5 rounded-full ${
+                      isAIEnabled ? "bg-green-100 text-green-700" : "bg-slate-100 text-slate-500"
+                    }`}>
+                      {isAIEnabled ? "运行中" : "未启动"}
+                    </span>
+                  </div>
+                  {/* --- 👇 新增开始：检测模式选择器 👇 --- */}
+  <div className="mb-3 mt-2 bg-slate-50 p-2 rounded border border-slate-100">
+    <div className="flex items-center justify-between mb-2">
+      <label className="text-xs font-bold text-slate-500">监测模式</label>
+      {/* 这是一个小提示，告诉用户当前阈值 */}
+      {algoType === "off_post" && (
+        <span className="text-[10px] text-orange-500 bg-orange-50 px-1 rounded">
+          阈值: 5分钟
+        </span>
+      )}
+    </div>
+    <div className="flex gap-2">
+      <button
+        onClick={() => setAlgoType("helmet")}
+        disabled={isAIEnabled} // 运行中禁止切换，防止逻辑混乱
+        className={`flex-1 py-1.5 text-xs rounded border transition-all flex items-center justify-center gap-1 ${
+          algoType === "helmet"
+            ? "bg-white border-blue-500 text-blue-600 shadow-sm font-bold ring-1 ring-blue-100"
+            : "bg-slate-100 border-transparent text-slate-500 hover:bg-white hover:border-slate-300"
+        }`}
+      >
+        ⛑️ 安全帽
+      </button>
+      <button
+        onClick={() => setAlgoType("off_post")}
+        disabled={isAIEnabled}
+        className={`flex-1 py-1.5 text-xs rounded border transition-all flex items-center justify-center gap-1 ${
+          algoType === "off_post"
+            ? "bg-white border-orange-500 text-orange-600 shadow-sm font-bold ring-1 ring-orange-100"
+            : "bg-slate-100 border-transparent text-slate-500 hover:bg-white hover:border-slate-300"
+        }`}
+      >
+        🏃 离岗检测
+      </button>
+    </div>
+  </div>
+  {/* --- 👆 新增结束 👆 --- */}
+                  <button
+                    onClick={handleToggleAI}
+                    disabled={aiLoading}
+                    className={`w-full py-2 rounded-md flex items-center justify-center gap-2 transition-all text-sm font-medium ${
+                      isAIEnabled
+                        ? "bg-red-50 text-red-600 border border-red-200 hover:bg-red-100"
+                        : "bg-blue-600 text-white hover:bg-blue-700"
+                    } ${aiLoading ? "opacity-70 cursor-wait" : ""}`}
+                  >
+                    {aiLoading ? (
+                      <>
+                        <Loader size={16} className="animate-spin" /> 处理中...
+                      </>
+                    ) : isAIEnabled ? (
+                      <>
+                        <ShieldAlert size={16} /> 停止监测
+                      </>
+                    ) : (
+                      <>
+                        <ShieldCheck size={16} /> 开启监测
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {/* PTZ Control Panel */}
+                <div className="bg-white rounded-lg border border-gray-200 overflow-y-auto shadow-lg flex-1">
+                  <PTZControlPanel
+                    video={maximizedVideo}
+                    onSuccess={(msg) => console.log(msg)}
+                    onError={(err) => console.error(err)}
+                  />
+                </div>
               </div>
             )}
           </div>
